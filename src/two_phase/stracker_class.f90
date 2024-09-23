@@ -89,6 +89,11 @@ module stracker_class
       type(struct_type), dimension(:), allocatable :: struct_old
       ! Event counter !!!! Need to deal with restarts !!!!
       integer :: eventcount
+      ! Logical to retain liquid core value
+      logical :: keep_core = .false.
+      ! What is the id value of the core? (default = 1)
+      integer :: core_value = 1
+
    contains
       procedure :: initialize                !< Initialization of stracker based on a provided VFS object
       procedure, private :: build            !< Private cclabel step without persistent id
@@ -118,20 +123,26 @@ contains
    
    
    !> Structure tracker initialization
-   subroutine initialize(this,vf,phase,make_label,name)
+   subroutine initialize(this,vf,phase,make_label,name,coreid)
       use messager,  only: die
       use vfs_class, only: remap_storage
       implicit none
       class(stracker), intent(inout) :: this
       class(vfs), target, intent(in) :: vf
-      integer, intent(in) :: phase
+      integer, intent(in) :: phase 
       procedure(make_label_ftype) :: make_label
       character(len=*), optional :: name
+      integer, optional :: coreid
       integer :: n,nn
       ! Set the name for the object
       if (present(name)) this%name=trim(adjustl(name))
       ! Set the phase
       this%phase=phase
+      ! Retain core?
+      if (present(coreid)) then 
+         this%keep_core = .true.
+         this%core_value = coreid 
+      end if 
       ! Point to our vfs object
       this%vf=>vf
       ! Check vfs object uses cell remap with storage
@@ -304,20 +315,30 @@ contains
          integer :: n
          ! Traverse merge list 
          do n=1,this%nmerge
-            ! If merging with core, retain id=1
-            if (this%merge(1,n).eq.1 .or. this%merge(2,n).eq.1) then 
-               this%newid(n) = 1
-               ! Add merge to merge_master list and collapse subsequent merges
-               call add_merge_master(this%merge(1,n),this%merge(2,n),this%newid(n))
-            end if
+            if (this%keep_core) then 
+               ! If merging with core, retain id
+               if (this%merge(1,n).eq.this%core_value .or. this%merge(2,n).eq.this%core_value) then 
+                  this%newid(n) = this%core_value 
+                  ! Add merge to merge_master list and collapse subsequent merges
+                  call add_merge_master(this%merge(1,n),this%merge(2,n),this%newid(n))
+               end if
 
-            ! Deal with structure not part of existing merge event
-            if (this%newid(n).eq.0) then
-               ! Generate new id for merge
-               this%newid(n) = this%generate_new_id() 
-               ! Add merge to merge_master list and collapse subsequent merges
-               call add_merge_master(this%merge(1,n),this%merge(2,n),this%newid(n))
-            end if 
+               ! Deal with structure not part of existing merge event
+               if (this%newid(n).eq.0) then
+                  ! Generate new id for merge
+                  this%newid(n) = this%generate_new_id() 
+                  ! Add merge to merge_master list and collapse subsequent merges
+                  call add_merge_master(this%merge(1,n),this%merge(2,n),this%newid(n))
+               end if 
+            else 
+               ! Deal with structure not part of existing merge event
+               if (this%newid(n).eq.0) then
+                  ! Generate new id for merge
+                  this%newid(n) = this%generate_new_id() 
+                  ! Add merge to merge_master list and collapse subsequent merges
+                  call add_merge_master(this%merge(1,n),this%merge(2,n),this%newid(n))
+               end if
+            end if  
          end do 
       end block determine_newid
 
@@ -330,12 +351,7 @@ contains
             do k=this%vf%cfg%kmin_,this%vf%cfg%kmax_; do j=this%vf%cfg%jmin_,this%vf%cfg%jmax_; do i=this%vf%cfg%imin_,this%vf%cfg%imax_
                ! Loop over oldids 
                do nn=1,this%merge_master(n)%noldid
-                  if (this%id_rmp(i,j,k).eq.this%merge_master(n)%oldids(nn)) then 
-                     !if (this%merge_master(n)%oldids(nn).eq.1) print *, "old id 1, newid: ",this%merge_master(n)%newid
-                     !print *, "oldid ", this%merge_master(n)%oldids(nn)
-                     !print *, "newid ", this%merge_master(n)%newid
-                     this%id_rmp(i,j,k)=this%merge_master(n)%newid
-                  end if 
+                  if (this%id_rmp(i,j,k).eq.this%merge_master(n)%oldids(nn)) this%id_rmp(i,j,k)=this%merge_master(n)%newid 
                end do 
             end do; end do; end do
          end do
@@ -505,21 +521,22 @@ contains
          integer :: n,n_prev,my_id,n_core,n_sum,core_index,ierr
          logical :: found
          class(*), allocatable :: retval
-
          ! Identify liquid core
-         n_sum = 0
-         n_core = 0
-         core_index = 0
-         do n=1,this%nstruct
-            if (this%struct(n)%id.eq.1) then 
-               call MPI_ALLREDUCE(this%struct(n)%n_,n_sum,1,MPI_INTEGER,MPI_SUM,this%vf%cfg%comm,ierr)
-               ! Check if current structure is largest
-               if (n_sum.gt.n_core) then 
-                  n_core = n_sum 
-                  core_index = n
-               end if  
-            end if 
-         end do 
+         if (this%keep_core) then 
+            n_sum = 0
+            n_core = 0
+            core_index = 0
+            do n=1,this%nstruct
+               if (this%struct(n)%id.eq.this%core_value) then 
+                  call MPI_ALLREDUCE(this%struct(n)%n_,n_sum,1,MPI_INTEGER,MPI_SUM,this%vf%cfg%comm,ierr)
+                  ! Check if current structure is largest
+                  if (n_sum.gt.n_core) then 
+                     n_core = n_sum 
+                     core_index = n
+                  end if  
+               end if 
+            end do 
+         end if 
 
          ! Reset structure split logical
          if (allocated(this%struct_split)) deallocate(this%struct_split)
@@ -533,19 +550,32 @@ contains
             ! Check if id already exists in tree
             call avl_retrieve(lt,my_id,this%split_tree,found,retval)
             if (found) then ! split occured
-               ! Do not give new id to core
-               if (n.ne.core_index) then 
+               if (this%keep_core) then
+                  ! Do not give new id to core
+                  if (n.ne.core_index) then 
+                     ! Assign new id to this structure
+                     this%struct(n)%id=this%generate_new_id()
+                     call add_split(my_id,this%struct(n)%id)
+                     ! Check if previous structure has a new id -> generate if needed
+                     n_prev = int_cast(retval)
+                     if (.not.this%struct_split(n_prev).and.n_prev.ne.core_index) then
+                        this%struct_split(n_prev)=.true.
+                        this%struct(n_prev)%id=this%generate_new_id()
+                        call add_split(my_id,this%struct(n_prev)%id)
+                     end if
+                  end if  
+               else
                   ! Assign new id to this structure
                   this%struct(n)%id=this%generate_new_id()
                   call add_split(my_id,this%struct(n)%id)
                   ! Check if previous structure has a new id -> generate if needed
                   n_prev = int_cast(retval)
-                  if (.not.this%struct_split(n_prev).and.n_prev.ne.core_index) then
+                  if (.not.this%struct_split(n_prev)) then
                      this%struct_split(n_prev)=.true.
                      this%struct(n_prev)%id=this%generate_new_id()
                      call add_split(my_id,this%struct(n_prev)%id)
                   end if 
-               end if
+               end if 
             else ! add id to tree: key=id, data=n (struct number)
                call avl_insert(lt,my_id,n,this%split_tree)
             end if
@@ -698,30 +728,45 @@ contains
          do n=1,this%nmerge
             ! Already has newid?
             if (this%newid(n).ne.0) cycle
-            ! Nothing to do for liquid core
-            if (newid.eq.oldid) cycle 
-            ! Check if this merge contains matching oldid or newid (occurs with merge2)
-            do nn=1,2
-               if (this%merge(nn,n).eq.oldid.or.this%merge(nn,n).eq.newid) then
-                  ! Check if one of any merges are happening with core, if so, retain id=1
-                  if (ANY(this%merge(:,n).eq.1)) then 
-                     do nnn = 1,2
-                        if (this%merge(nnn,n).ne.1) then 
-                           this%newid(n) = 1
-                           call append_merge_master(this%nmerge_master,this%merge(nnn,n))
-                           call collapse_merges(this%merge(nnn,n),1) 
-                        end if 
-                     end do
-                  else 
+
+            if (this%keep_core) then 
+               ! Nothing to do for liquid core
+               if (newid.eq.oldid) cycle 
+               ! Check if this merge contains matching oldid or newid (occurs with merge2)
+               do nn=1,2
+                  if (this%merge(nn,n).eq.oldid.or.this%merge(nn,n).eq.newid) then
+                     ! Check if one of any merges are happening with core, if so, retain id=1
+                     if (ANY(this%merge(:,n).eq.this%core_value)) then 
+                        do nnn = 1,2
+                           if (this%merge(nnn,n).ne.this%core_value) then 
+                              this%newid(n) = this%core_value 
+                              call append_merge_master(this%nmerge_master,this%merge(nnn,n))
+                              call collapse_merges(this%merge(nnn,n),1) 
+                           end if 
+                        end do
+                     else 
+                        ! Set newid
+                        this%newid(n)=newid
+                        ! Append other id of this merge to merge master
+                        call append_merge_master(this%nmerge_master,this%merge(otherid(nn),n))
+                        ! Collapse other id of this merge 
+                        call collapse_merges(this%merge(otherid(nn),n),newid) 
+                     end if 
+                  end if 
+               end do
+            else 
+               ! Check if this merge contains matching oldid or newid (occurs with merge2)
+               do nn=1,2
+                  if (this%merge(nn,n).eq.oldid.or.this%merge(nn,n).eq.newid) then
                      ! Set newid
                      this%newid(n)=newid
                      ! Append other id of this merge to merge master
                      call append_merge_master(this%nmerge_master,this%merge(otherid(nn),n))
                      ! Collapse other id of this merge 
-                     call collapse_merges(this%merge(otherid(nn),n),newid) 
+                     call collapse_merges(this%merge(otherid(nn),n),newid)
                   end if 
-               end if
-            end do
+               end do
+            end if  
          end do 
       end subroutine 
 

@@ -291,9 +291,6 @@ contains
          call MPI_ALLREDUCE(MPI_IN_PLACE,u_vol,1,MPI_REAL_WP,MPI_SUM,strack%vf%cfg%comm,ierr)
          call MPI_ALLREDUCE(MPI_IN_PLACE,v_vol,1,MPI_REAL_WP,MPI_SUM,strack%vf%cfg%comm,ierr)
          call MPI_ALLREDUCE(MPI_IN_PLACE,w_vol,1,MPI_REAL_WP,MPI_SUM,strack%vf%cfg%comm,ierr)
-         
-         print *, "strack%nstruct ",strack%nstruct
-         print *, "strack%nmerge_master ",strack%nmerge_master
 
          if (vol_struct.gt.0.0_WP) then 
             ! Moments of inertia
@@ -455,10 +452,20 @@ contains
          integer, parameter :: amr_ref_lvl=4
          integer :: i,j,k,n,si,sj,sk
          integer :: ierr
+         logical :: keep_core 
+         integer :: coreid 
          ! Create a VOF solver with r2p reconstruction
          call vf%initialize(cfg=cfg,reconstruction_method=elvira,transport_method=remap_storage,name='VOF')
+
+         call input%read('Keep core',keep_core)
          ! Create structure tracker
-         call strack%initialize(vf=vf,phase=0,make_label=label_liquid,name='diesel_jet')
+         if (keep_core) then 
+            call input%read('Core id',coreid,1)
+            call strack%initialize(vf=vf,phase=0,make_label=label_liquid,name='diesel_jet',coreid=coreid)
+         else 
+            call strack%initialize(vf=vf,phase=0,make_label=label_liquid,name='diesel_jet')
+         end if      
+         
          ! Initialize the jet coming into the domain
          call input%read('Jet radius',radius)
 
@@ -762,9 +769,8 @@ contains
          ! Advance stracker
          call strack%advance(make_label=label_liquid)
          call analyze_merge_split
-         ! print *, "strack%nstruct",strack%nstruct
 
-         ! ! Output master stracker lists
+         ! Output master stracker lists
          ! print_merge_master: block
          ! integer :: n,nn,ierr
          ! do nn=0,cfg%nproc
