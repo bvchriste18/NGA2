@@ -778,7 +778,7 @@ contains
          !       print*,'rank=',nn
          !       if (strack%nmerge_master.gt.0) print*,'Master merge list'
          !       do n=1,strack%nmerge_master
-         !          print*,'noldid=',strack%merge_master(n)%noldid
+         !          *,'noldid=',strack%merge_master(n)%noldid
          !          print*,' oldid=',strack%merge_master(n)%oldids(1:strack%merge_master(n)%noldid)
          !          print*,' newid=',strack%merge_master(n)%newid
          !       end do
